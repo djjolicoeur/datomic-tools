@@ -1,0 +1,41 @@
+{:db/id #db/id[:db.part/db]
+ :db/ident :datomic-tools.schema-migration/id
+ :db/valueType :db.type/long
+ :db/cardinality :db.cardinality/one
+ :db/unique :db.unique/value
+ :db.install/_attribute :db.part/db}
+
+{:db/id #db/id[:db.part/db]
+ :db/ident :datomic-tools.schema-migration/tx-id
+ :db/valueType :db.type/long
+ :db/cardinality :db.cardinality/one
+ :db/unique :db.unique/value
+ :db.install/_attribute :db.part/db}
+
+{:db/id #db/id[:db.part/db]
+ :db/ident :datomic-tools.fact-migration/id
+ :db/valueType :db.type/long
+ :db/cardinality :db.cardinality/one
+ :db/unique :db.unique/value
+ :db.install/_attribute :db.part/db}
+
+{:db/id #db/id[:db.part/db]
+ :db/ident :datomic-tools.fact-migration/tx-id
+ :db/valueType :db.type/long
+ :db/cardinality :db.cardinality/one
+ :db/unique :db.unique/value
+ :db.install/_attribute :db.part/db}
+
+{:db/id #db/id[:db.part/db]
+ :db/ident :datomic-tools.job-migration/id
+ :db/valueType :db.type/long
+ :db/cardinality :db.cardinality/one
+ :db/unique :db.unique/value
+ :db.install/_attribute :db.part/db}
+
+{:db/id #db/id[:db.part/db]
+ :db/ident :datomic-tools.job-migration/tx-id
+ :db/valueType :db.type/long
+ :db/cardinality :db.cardinality/one
+ :db/unique :db.unique/value
+ :db.install/_attribute :db.part/db}
