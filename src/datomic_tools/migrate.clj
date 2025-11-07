@@ -215,23 +215,92 @@
             reverse-datoms
             (d/transact conn)))))
 
+;; Chunked transaction helpers
+
+(def type->chunk-aliases
+  {SCHEMA-MIGRATION [:schema SCHEMA-MIGRATION]
+   SEED-FACT-MIGRATION [:facts :seed-facts SEED-FACT-MIGRATION]
+   JOB-MIGRATION [:jobs :job JOB-MIGRATION]})
+
+(defn normalize-chunk-size
+  [size]
+  (when (some? size)
+    (if (and (number? size) (pos? size))
+      (long (Math/ceil size))
+      (throw (ex-info "Chunk size must be a positive integer"
+                      {:provided size})))))
+
+(defn chunk-size-for
+  [opts type]
+  (let [chunk-opt (:chunk-size opts)]
+    (cond
+      (nil? chunk-opt) nil
+      (map? chunk-opt) (let [aliases (conj (get type->chunk-aliases type []) :default)]
+                         (some #(normalize-chunk-size (get chunk-opt %)) aliases))
+      :else (normalize-chunk-size chunk-opt))))
+
+(defn chunk-tx-data
+  [chunk-size data]
+  (let [tx-data (seq data)]
+    (cond
+      (nil? tx-data) []
+      (nil? chunk-size) [tx-data]
+      :else (partition-all chunk-size tx-data))))
+
+(defn rollback-chunked-txs!
+  [db-conn tx-ids]
+  (doseq [tx-id (reverse (filter some? tx-ids))]
+    (try
+      (info :msg "Rolling back chunk transaction" :tx-id tx-id)
+      (rollback-tx db-conn tx-id)
+      (catch Exception e
+        (warn :msg "Failed to rollback chunk transaction"
+              :tx-id tx-id
+              :error (.getMessage e))))))
+
+(defn transact-chunks!
+  [db-conn data chunk-size]
+  (let [chunks (seq (chunk-tx-data chunk-size data))]
+    (loop [remaining chunks
+           tx-results []]
+      (if-let [chunk (first remaining)]
+        (let [chunk-data (vec chunk)
+              tx-res (try
+                       @(d/transact db-conn chunk-data)
+                       (catch Exception e
+                         (rollback-chunked-txs! db-conn (map :tx-id tx-results))
+                         (throw e)))
+              tx-id (tx-id tx-res)]
+          (recur (rest remaining) (conj tx-results {:tx-id tx-id
+                                                    :tx-res tx-res})))
+        tx-results))))
+
 
 ;; Schema migrations
 (defn transact-file
-  [db-conn type id migration-eid data]
-  (info :msg (format "Migrating: %s - %s" type id))
-  (debug :msg "Transacting Data:" :data data)
-  (try
-    (let [id-attr (type->id-attr type)
-          tx-id-attr
-          (type->tx-id-attr type)
-          tx-res @(d/transact db-conn data)
-          tx-id (tx-id tx-res)]
-      @(d/transact db-conn [[:db/add migration-eid tx-id-attr tx-id]]))
-    (catch Exception e
-      (error :msg (format "Failed schema migration: %s" id) :data (:ex-data e))
-      @(d/transact db-conn [[:db.fn/retractEntity migration-eid]])
-      (throw e))))
+  ([db-conn type id migration-eid data]
+   (transact-file db-conn type id migration-eid data {}))
+  ([db-conn type id migration-eid data opts]
+   (let [chunk-size (chunk-size-for opts type)]
+     (info :msg (format "Migrating: %s - %s" type id)
+           :chunk-size chunk-size)
+     (debug :msg "Transacting Data:" :data data)
+     (try
+       (let [id-attr (type->id-attr type)
+             tx-id-attr (type->tx-id-attr type)
+             chunk-results (transact-chunks! db-conn data chunk-size)
+             tx-id (some-> chunk-results last :tx-id)]
+         (when (and chunk-size (seq chunk-results))
+           (debug :msg "Chunked migration complete"
+                  :migration/id id
+                  :chunks (count chunk-results)
+                  :chunk-size chunk-size))
+         (when tx-id
+           @(d/transact db-conn [[:db/add migration-eid tx-id-attr tx-id]])))
+       (catch Exception e
+         (error :msg (format "Failed schema migration: %s" id) :data (:ex-data e))
+         @(d/transact db-conn [[:db.fn/retractEntity migration-eid]])
+         (throw e))))))
 
 (defn edn-available?
   [type db-conn id]
@@ -240,15 +309,17 @@
         SEED-FACT-MIGRATION (fact-available? db-conn id)))
 
 (defn migrate-edn-file!
-  [type db-conn id file]
-  (if (edn-available? type db-conn id)
-    (let [id-attr (type->id-attr type)
-          data (datomic.Util/readAll (io/reader file))
-          temp (d/tempid :db.part/user)
-          {:keys [db-after tempids]} @(d/transact db-conn [{:db/id temp id-attr id}])
-          migration-eid (d/resolve-tempid db-after tempids temp)]
-      (transact-file db-conn type id migration-eid data))
-    (info :msg (format "%s Migration %s handled elsewhere, already exists in db" type id))))
+  ([type db-conn id file]
+   (migrate-edn-file! type db-conn id file {}))
+  ([type db-conn id file opts]
+   (if (edn-available? type db-conn id)
+     (let [id-attr (type->id-attr type)
+           data (datomic.Util/readAll (io/reader file))
+           temp (d/tempid :db.part/user)
+           {:keys [db-after tempids]} @(d/transact db-conn [{:db/id temp id-attr id}])
+           migration-eid (d/resolve-tempid db-after tempids temp)]
+       (transact-file db-conn type id migration-eid data opts))
+     (info :msg (format "%s Migration %s handled elsewhere, already exists in db" type id)))))
 
 (defn migrate-file-map
   [type db-conn migration-path]
@@ -284,33 +355,42 @@
 (def migrate-job-map (partial migrate-file-map JOB-MIGRATION))
 
 (defn transact-job
-  [db-conn id job-eid data]
-  (info :msg (format "Migrating Job: %s" id))
-  (try
-    (let [tx-res @(d/transact db-conn data)
-          tx-id (tx-id tx-res)
-          tx-id-attr (type->tx-id-attr JOB-MIGRATION)]
-      @(d/transact db-conn [[:db/add job-eid tx-id-attr tx-id]]))
-    (catch Exception e
-      (error :msg "failed to migrate job:" :job-id id :data (ex-data e))
-      @(d/transact db-conn [[:db.fn/retractEntity job-eid]])
-      (throw e))
-    (finally
-      (info :msg "Releasing job TX" :job-id id)
-      (alter-var-root #'*generate-tx* (constantly nil)))))
+  [db-conn id job-eid data opts]
+  (let [chunk-size (chunk-size-for opts JOB-MIGRATION)]
+    (info :msg (format "Migrating Job: %s" id) :chunk-size chunk-size)
+    (try
+      (let [tx-id-attr (type->tx-id-attr JOB-MIGRATION)
+            chunk-results (transact-chunks! db-conn data chunk-size)
+            tx-id (some-> chunk-results last :tx-id)]
+        (when (and chunk-size (seq chunk-results))
+          (debug :msg "Chunked job migration complete"
+                 :job-id id
+                 :chunks (count chunk-results)
+                 :chunk-size chunk-size))
+        (when tx-id
+          @(d/transact db-conn [[:db/add job-eid tx-id-attr tx-id]])))
+      (catch Exception e
+        (error :msg "failed to migrate job:" :job-id id :data (ex-data e))
+        @(d/transact db-conn [[:db.fn/retractEntity job-eid]])
+        (throw e))
+      (finally
+        (info :msg "Releasing job TX" :job-id id)
+        (alter-var-root #'*generate-tx* (constantly nil))))))
 
 (defn migrate-job!
-  [db-conn id file]
-  (if (job-available? db-conn id)
-    (let [_ (load-reader (io/reader file))
-          data (*generate-tx* (d/db db-conn))
-          temp (d/tempid :db.part/user)
-          id-attr (type->id-attr JOB-MIGRATION)
-          {:keys [db-after tempids]} @(d/transact db-conn
-                                                  [{:db/id temp id-attr id}])
-          job-eid (d/resolve-tempid db-after tempids temp)]
-      (transact-job db-conn id job-eid data))
-    (info :msg "Job migration handled elsewhere" :job-id id)))
+  ([db-conn id file]
+   (migrate-job! db-conn id file {}))
+  ([db-conn id file opts]
+   (if (job-available? db-conn id)
+     (let [_ (load-reader (io/reader file))
+           data (*generate-tx* (d/db db-conn))
+           temp (d/tempid :db.part/user)
+           id-attr (type->id-attr JOB-MIGRATION)
+           {:keys [db-after tempids]} @(d/transact db-conn
+                                                   [{:db/id temp id-attr id}])
+           job-eid (d/resolve-tempid db-after tempids temp)]
+       (transact-job db-conn id job-eid data opts))
+     (info :msg "Job migration handled elsewhere" :job-id id))))
 
 ;; Top level migration fns
 
@@ -333,39 +413,41 @@
 
 
 (defmulti migrate-file!
-  (fn [db-conn id file-info] (:type file-info)))
+  (fn [db-conn id file-info opts] (:type file-info)))
 
 (defmethod migrate-file! SCHEMA-MIGRATION
-  [db-conn id file-info]
-  (migrate-schema! db-conn id (:file file-info)))
+  [db-conn id file-info opts]
+  (migrate-schema! db-conn id (:file file-info) opts))
 
 (defmethod migrate-file! SEED-FACT-MIGRATION
-  [db-conn id file-info]
-  (migrate-facts! db-conn id (:file file-info)))
+  [db-conn id file-info opts]
+  (migrate-facts! db-conn id (:file file-info) opts))
 
 (defmethod migrate-file! JOB-MIGRATION
-  [db-conn id file-info]
-  (migrate-job! db-conn id (:file file-info)))
+  [db-conn id file-info opts]
+  (migrate-job! db-conn id (:file file-info) opts))
 
 (defn migrate!
-  [db-conn schema-path facts-path job-path]
-  (ensure-install db-conn)
-  (let [schema-migrations (migrate-schema-map db-conn schema-path)
-        fact-migrations (migrate-facts-map db-conn facts-path)
-        job-migrations (migrate-job-map db-conn job-path)
-        file-map (->> (merge-with merge-fn schema-migrations fact-migrations job-migrations)
-                        (into (sorted-map-by <)))]
-    (doseq [[k v] file-map]
-      (if (vector? v)
-        (let [[schema-file fact-file job-file] (order-files v)]
-          (info :msg "Migrating files" :id k :files [schema-file fact-file job-file])
-          (when schema-file
-            (migrate-file! db-conn k schema-file))
-          (when fact-file
-            (migrate-file! db-conn k fact-file))
-          (when job-file
-            (migrate-file! db-conn k job-file)))
-        (migrate-file! db-conn k v)))))
+  ([db-conn schema-path facts-path job-path]
+   (migrate! db-conn schema-path facts-path job-path {}))
+  ([db-conn schema-path facts-path job-path opts]
+   (ensure-install db-conn)
+   (let [schema-migrations (migrate-schema-map db-conn schema-path)
+         fact-migrations (migrate-facts-map db-conn facts-path)
+         job-migrations (migrate-job-map db-conn job-path)
+         file-map (->> (merge-with merge-fn schema-migrations fact-migrations job-migrations)
+                       (into (sorted-map-by <)))]
+     (doseq [[k v] file-map]
+       (if (vector? v)
+         (let [[schema-file fact-file job-file] (order-files v)]
+           (info :msg "Migrating files" :id k :files [schema-file fact-file job-file])
+           (when schema-file
+             (migrate-file! db-conn k schema-file opts))
+           (when fact-file
+             (migrate-file! db-conn k fact-file opts))
+           (when job-file
+             (migrate-file! db-conn k job-file opts)))
+         (migrate-file! db-conn k v opts))))))
 
 ;; File Creation Helpers
 
@@ -449,8 +531,3 @@
       (debug "Generating migration file:" file)
       (generate-file type file))
     file-names))
-
-
-
-
-

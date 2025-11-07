@@ -3,7 +3,8 @@
             [clojure.walk :refer [postwalk]]
             [datomic.peer :as d]
             [clojure.java.io :as io]
-            [clojure.tools.logging :refer [debug info warn error]]))
+            [clojure.tools.logging :refer [debug info warn error]]
+            [datomic-tools.migrate :as migrate]))
 
 (defn- use-method
   [^clojure.lang.MultiFn multifn dispatch-val func]
@@ -84,8 +85,50 @@
 
 (use-method clojure.pprint/simple-dispatch DatomicConnection pr)
 
+;;-------------------------------------------------
+;; Migration components
+;;-------------------------------------------------
 
+(defn- ensure-conn
+  [db]
+  (cond
+    (nil? db) nil
+    (and (map? db) (contains? db :conn)) (:conn db)
+    :else db))
 
+(defrecord MigrationRunner [schema-path facts-path job-path migrate-opts db migrated?]
+  component/Lifecycle
+  (start [this]
+    (if migrated?
+      this
+      (let [conn (ensure-conn db)]
+        (when-not conn
+          (throw (ex-info "MigrationRunner requires a Datomic connection"
+                          {:schema-path schema-path
+                           :facts-path facts-path
+                           :job-path job-path})))
+        (info :msg "Running datomic-tools migrations"
+              :schema schema-path
+              :facts facts-path
+              :jobs job-path
+              :chunk-size (:chunk-size migrate-opts))
+        (migrate/migrate! conn schema-path facts-path job-path (or migrate-opts {}))
+        (assoc this :migrated? true))))
+  (stop [this]
+    (assoc this :migrated? false)))
+
+(defn new-migration-runner
+  "Returns a Component that runs migrations at startup. Expects a config map with
+   keys :schema, :prod-facts or :facts, :prod-jobs or :jobs, and optional :migrate-opts.
+   Use component/using to provide the :db dependency."
+  ([config]
+   (new-migration-runner config {}))
+  ([config overrides]
+   (let [{:keys [schema prod-facts facts prod-jobs jobs migrate-opts]} (merge config overrides)]
+     (map->MigrationRunner {:schema-path schema
+                            :facts-path (or prod-facts facts)
+                            :job-path (or prod-jobs jobs)
+                            :migrate-opts migrate-opts}))))
 
 
 
