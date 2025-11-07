@@ -1,5 +1,6 @@
 (ns datomic-tools.migrate-test
   (:require [clojure.test :refer :all]
+            [clojure.java.io :as io]
             [datomic.api :as d]
             [datomic-tools.migrate :as migrate]
             [datomic-tools.test-util :as t]
@@ -32,6 +33,14 @@
 (def test-job-id 2023121200490347)
 
 (def test-job-ids #{test-job-id})
+
+(def chunk-schema-id 2024010101010101)
+(def chunk-schema-resource
+  "datomic-tools/chunk-tests/schema/2024010101010101-chunked-schema.edn")
+
+(def chunk-facts-id 2024010101010202)
+(def chunk-facts-resource
+  "datomic-tools/chunk-tests/facts/2024010101010202-conflicting-facts.edn")
 
 
 (defn system->conn
@@ -148,12 +157,10 @@
 (deftest test-existing-migrations-and-partials
   (t/with-system (system/dev-system)
     (fn [system]
-      (let [config system/basic-dev-migration-config
+      (let [{:keys [schema prod-facts prod-jobs migrate-opts]}
+            system/basic-dev-migration-config
             db-conn (:conn (:db system))
-            {schema :schema 
-             facts :prod-facts
-             jobs :prod-jobs} config
-            result (migrate/migrate! db-conn schema facts jobs)
+            result (migrate/migrate! db-conn schema prod-facts prod-jobs migrate-opts)
             existing-schema (migrate/existing-migrations migrate/SCHEMA-MIGRATION
                                                          db-conn)
             existing-facts (migrate/existing-migrations migrate/SEED-FACT-MIGRATION
@@ -174,11 +181,9 @@
 (deftest test-migration-available?-and-partials
   (t/with-system (system/dev-system)
     (fn [system]
-      (let [config system/basic-dev-migration-config
+      (let [{:keys [schema prod-facts prod-jobs migrate-opts]}
+            system/basic-dev-migration-config
             db-conn (:conn (:db system))
-            {schema :schema 
-             facts :prod-facts
-             jobs :prod-jobs} config
             _ (migrate/ensure-install db-conn)
             pre-schema (migrate/migration-available? migrate/SCHEMA-MIGRATION
                                                      db-conn
@@ -192,7 +197,7 @@
             pre-schema-partial (migrate/schema-available? db-conn user-schema-id)
             pre-facts-partial (migrate/fact-available? db-conn user-facts-id)
             pre-jobs-partial (migrate/job-available? db-conn test-job-id)
-            _ (migrate/migrate! db-conn schema facts jobs)
+            _ (migrate/migrate! db-conn schema prod-facts prod-jobs migrate-opts)
             post-schema (migrate/migration-available? migrate/SCHEMA-MIGRATION
                                                       db-conn
                                                       user-schema-id)
@@ -250,14 +255,47 @@
         (t/isnt (= unfiltered filtered))
         (t/isnt (contains? e-ids tx-id))))))
 
+(deftest chunked-schema-migration-applies-all-chunks
+  (t/with-system (system/dev-system)
+    (fn [system]
+      (let [conn (system->conn system)
+            file (io/resource chunk-schema-resource)
+            opts {:chunk-size {migrate/SCHEMA-MIGRATION 1}}]
+        (migrate/ensure-install conn)
+        (migrate/migrate-schema! conn chunk-schema-id file opts)
+        (let [db (d/db conn)
+              attrs [:chunk-test/alpha :chunk-test/beta :chunk-test/gamma]]
+          (doseq [attr attrs]
+            (is (d/attribute db attr)))
+          (is (false? (migrate/schema-available? conn chunk-schema-id))))))))
+
+(deftest chunked-fact-migration-rolls-back-on-error
+  (t/with-system (system/dev-system)
+    (fn [system]
+      (let [conn (system->conn system)
+            {:keys [schema prod-facts prod-jobs migrate-opts]}
+            system/basic-dev-migration-config
+            file (io/resource chunk-facts-resource)
+            opts {:chunk-size {migrate/SEED-FACT-MIGRATION 1}}]
+        ;; ensure base schema/data exists for constraints
+        (migrate/migrate! conn schema prod-facts prod-jobs migrate-opts)
+        (is (thrown? Exception
+                     (migrate/migrate-facts! conn chunk-facts-id file opts)))
+        (is (true? (migrate/fact-available? conn chunk-facts-id)))
+        (let [db (d/db conn)]
+          (is (empty?
+               (d/q '[:find ?e
+                      :in $ ?username
+                      :where [?e :user/username ?username]]
+                    db "chunked-user-a")))
+          (is (empty?
+               (d/q '[:find ?e
+                      :in $ ?username
+                      :where [?e :user/username ?username]]
+                    db "chunked-user-b"))))))))
+
 (deftest reverse-datom
   )
-
-
-
-
-
-
 
 
 
