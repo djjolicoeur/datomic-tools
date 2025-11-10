@@ -1,0 +1,10 @@
+;; 2024010101010202-conflicting-facts.edn --- Test fixture for chunked fact rollback
+{:db/id #db/id[:db.part/user]
+ :model/type :user
+ :user/username "chunked-user-a"
+ :user/email "chunked@example.com"}
+
+{:db/id #db/id[:db.part/user]
+ :model/type :user
+ :user/username "chunked-user-b"
+ :user/email "chunked@example.com"}

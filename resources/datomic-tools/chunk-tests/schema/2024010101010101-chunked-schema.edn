@@ -1,0 +1,21 @@
+;; 2024010101010101-chunked-schema.edn --- Test fixture for chunked schema migrations
+{:db/id #db/id[:db.part/db]
+ :db/ident :chunk-test/alpha
+ :db/valueType :db.type/keyword
+ :db/cardinality :db.cardinality/one
+ :db/doc "Chunked schema test attribute A"
+ :db.install/_attribute :db.part/db}
+
+{:db/id #db/id[:db.part/db]
+ :db/ident :chunk-test/beta
+ :db/valueType :db.type/string
+ :db/cardinality :db.cardinality/one
+ :db/doc "Chunked schema test attribute B"
+ :db.install/_attribute :db.part/db}
+
+{:db/id #db/id[:db.part/db]
+ :db/ident :chunk-test/gamma
+ :db/valueType :db.type/long
+ :db/cardinality :db.cardinality/one
+ :db/doc "Chunked schema test attribute C"
+ :db.install/_attribute :db.part/db}
