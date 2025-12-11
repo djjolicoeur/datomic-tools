@@ -18,4 +18,6 @@
   :repl-options {:init-ns user}
   :profiles {:dev {:source-paths ["dev"]}}
   :deploy-repositories [["clojars" {:url "https://repo.clojars.org"
+                                    :username :env/CLOJARS_USERNAME
+                                    :password :env/CLOJARS_PASSWORD
                                     :sign-releases false}]])
