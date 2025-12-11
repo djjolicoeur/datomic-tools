@@ -16,5 +16,6 @@
   :jvm-opts ["-Dclojure.tools.logging.factory=clojure.tools.logging.impl/slf4j-factory"]
   :plugins [[cider/cider-nrepl "0.43.1"]]
   :repl-options {:init-ns user}
-  :profiles
-  {:dev {:source-paths ["dev"]}})
+  :profiles {:dev {:source-paths ["dev"]}}
+  :deploy-repositories [["clojars" {:url "https://repo.clojars.org"
+                                    :sign-releases false}]])

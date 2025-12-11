@@ -135,6 +135,10 @@ When a migration fails you often want to undo the datoms that were applied befor
 - Run `lein test` (or your preferred REPL flow) to exercise the migration helpers against an in-memory Datomic peer.
 - Sample migrations live under `resources/datomic-tools/testmigrations`; feel free to copy that layout when bootstrapping a new service.
 
+## Publishing Snapshots
+
+Merges to `main` automatically publish the current `-SNAPSHOT` version to Clojars via GitHub Actions (`.github/workflows/publish-snapshot.yml`). Add the secrets `CLOJARS_USERNAME` and `CLOJARS_PASSWORD` to the repository for the deploy to succeed. The workflow installs Leiningen, runs `lein test`, writes credentials to `~/.lein/credentials.clj`, and runs `lein deploy clojars`.
+
 ## License
 
 Copyright © 2023 Dan Jolicoeur
